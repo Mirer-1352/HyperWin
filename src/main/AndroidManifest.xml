@@ -3,6 +3,12 @@
     <permission android:name="pub.chara.miuipadmeta.modern.permission.CONFIGURE"
         android:protectionLevel="signature" />
     <uses-permission android:name="pub.chara.miuipadmeta.modern.permission.CONFIGURE" />
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
+    </queries>
     <application
         android:name=".ScopeApplication"
         android:allowBackup="false"
@@ -13,6 +19,9 @@
             android:authorities="pub.chara.miuipadmeta.modern.XposedService"
             android:exported="true" />
         <activity android:name=".SettingsActivity" android:exported="true"
+            android:enableOnBackInvokedCallback="false"
+            android:launchMode="singleTask"
+            android:theme="@style/HyperWinTheme"
             android:label="@string/app_name">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />

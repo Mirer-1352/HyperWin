@@ -10,7 +10,7 @@ import android.util.Log;
 import android.view.KeyEvent;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
-import java.util.Set;
+import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 import io.github.libxposed.api.XposedModule;
 
@@ -20,11 +20,14 @@ public final class WinModule extends XposedModule {
     // KeyGestureController uses this bit to start keyboard combinations only on an interactive display.
     private static final int POLICY_INTERACTIVE = 0x20000000;
     private record Focus(String pkg, IBinder token, Object policy, int uid) {}
-    private record Target(Focus focus) {}
+    private record Target(Focus focus, int mask) {
+        boolean has(int feature) { return ShortcutFeatures.has(mask, feature); }
+    }
     private record Dispatch(KeyEvent event, Target target, String phase) {}
 
     private final WinPresses uiPresses = new WinPresses();
     private final WinPresses dispatchPresses = new WinPresses();
+    private final WinPresses winTabPresses = new WinPresses();
     private final AltTabPresses altQueue = new AltTabPresses();
     private final AltTabPresses altDispatch = new AltTabPresses();
     private final ThreadLocal<Dispatch> allowedEvent = new ThreadLocal<>();
@@ -34,7 +37,10 @@ public final class WinModule extends XposedModule {
 
     private volatile boolean ready;
     private volatile boolean altTabReady;
-    private Set<String> allowedApps = Set.of();
+    private Map<String, Integer> policies = Map.of();
+    private String modulePackage;
+    private boolean configuredFn;
+    private Integer previewMask;
     private volatile Focus focused;
     private volatile Target routeTarget;
     private Method keyguardOn;
@@ -52,17 +58,24 @@ public final class WinModule extends XposedModule {
             boolean altReady = installAltQueue(param.getClassLoader());
             boolean winTabReady = installWinTabFallback(param.getClassLoader());
             installFnLock(param.getClassLoader());
+            modulePackage = getModuleApplicationInfo().packageName;
+            int capabilities = ShortcutFeatures.WIN_UI | ShortcutFeatures.WIN_PASS | ShortcutFeatures.WIN_TAB_PASS;
+            if (altReady) capabilities |= ShortcutFeatures.ALT_DISPATCH | ShortcutFeatures.ALT_QUEUE;
+            if (winTabReady) capabilities |= ShortcutFeatures.WIN_TAB_FALLBACK;
+            if (fnLock != null) capabilities |= ShortcutFeatures.FN_LOCK;
             info("READY scope=lsposed-boot-snapshot defaultDisplay=true ownerUserOnly=true altTab=" + altReady
                     + " winTabFallback=" + winTabReady);
-            new BootScopeLoader(getModuleApplicationInfo().packageName, new BootScopeLoader.Listener() {
-                @Override public void applied(Set<String> apps, boolean systemScoped,
-                        android.content.Context context, boolean fnEnabled) {
-                    applyBootScope(apps, systemScoped);
+            new BootScopeLoader(modulePackage, capabilities, new BootScopeLoader.Listener() {
+                @Override public void applied(ModuleControl.Snapshot snapshot,
+                        android.content.Context context, String source) {
                     if (fnLock != null) {
-                        try { fnLock.start(context, fnEnabled); }
+                        try { fnLock.start(context); }
                         catch (RuntimeException | LinkageError error) { failure("FN_LOCK_START_FAILED", error); }
                     }
+                    applyPolicies(snapshot, source);
                 }
+
+                @Override public void preview(Integer mask) { applyPreview(mask); }
 
                 @Override public void failed(Throwable error) {
                     failure("SCOPE_BOOT_ERROR using Android defaults", error);
@@ -120,7 +133,7 @@ public final class WinModule extends XposedModule {
             if (WinPolicy.isWinKey(event.getKeyCode())) {
                 // Consume a matching UP if this press skipped the native UI on DOWN.
                 // Otherwise let the native handler finish presses it started outside scope.
-                boolean suppress = matchPress(uiPresses, event, target) != null;
+                boolean suppress = matchPress(uiPresses, event, withFeature(target, ShortcutFeatures.WIN_UI)) != null;
                 if (isUp(event)) finish(uiPresses, event);
                 trace("UI", event, target, suppress, null);
                 return suppress ? null : chain.proceed();
@@ -133,16 +146,13 @@ public final class WinModule extends XposedModule {
             if (!ready || !(chain.getArg(1) instanceof KeyEvent event)) return chain.proceed();
             boolean winEvent = WinPolicy.isWinEvent(event.getKeyCode(), event.getMetaState());
             boolean altEvent = altTabReady && AltTabPresses.observes(event.getKeyCode());
-            if (!winEvent && !altEvent) return chain.proceed();
+            if (!winEvent && !altEvent && event.getKeyCode() != AltTabPresses.TAB) return chain.proceed();
 
             boolean win = WinPolicy.isWinKey(event.getKeyCode());
             Target target = chain.getArg(0) instanceof IBinder binder ? currentTarget(binder) : null;
-            boolean allowWin = win && target != null ? matchPress(dispatchPresses, event, target) == target
-                    : winEvent && !win && dispatchPresses.hasTarget(event.getDeviceId(), target);
-            // Record excluded DOWN too, so a delayed retry after a focus change cannot
-            // turn it into an eligible DOWN.
-            if (win && target == null) matchPress(dispatchPresses, event, null);
-            boolean allowAlt = altEvent && routeAltTab(altDispatch, event, target);
+            boolean allowWin = routeWin(event, target, winEvent, win);
+            boolean allowAlt = altEvent && routeAltTab(altDispatch, event,
+                    withFeature(target, ShortcutFeatures.ALT_DISPATCH));
 
             Dispatch previous = allowedEvent.get();
             if (allowWin || allowAlt) allowedEvent.set(new Dispatch(event, target, "DISPATCH"));
@@ -162,6 +172,8 @@ public final class WinModule extends XposedModule {
                     }
                     traceAlt("DISPATCH", event, target, allowAlt, result);
                 }
+                if (event.getKeyCode() == AltTabPresses.TAB && result instanceof Long decision
+                        && (decision < 0 || (isUp(event) && decision == 0))) finish(winTabPresses, event);
                 return result;
             } finally {
                 if (previous == null) allowedEvent.remove();
@@ -187,13 +199,30 @@ public final class WinModule extends XposedModule {
         info("HOOK pass=" + vendor.toGenericString());
     }
 
+    private boolean routeWin(KeyEvent event, Target target, boolean winEvent, boolean win) {
+        Target eligible = target != null && ShortcutFeatures.allowWinChord(target.mask, false) ? target : null;
+        if (win) {
+            Object original = matchPress(dispatchPresses, event, eligible);
+            return eligible != null && original == eligible;
+        }
+        boolean heldWin = dispatchPresses.hasTarget(event.getDeviceId(), eligible);
+        boolean winTab = WinPolicy.isWinTab(event.getKeyCode(), event.getModifiers());
+        if (event.getKeyCode() == AltTabPresses.TAB) {
+            Target chord = heldWin && winTab && ShortcutFeatures.allowWinChord(eligible.mask, true) ? eligible : null;
+            Object original = matchPress(winTabPresses, event, chord);
+            if (winTab) return chord != null && original == chord;
+            if (isUp(event) && target != null && original == target) return true;
+        }
+        return winEvent && heldWin;
+    }
+
     private void installFnLock(ClassLoader loader) {
         try {
             FnLockController controller = new FnLockController(loader, new FnLockController.Host() {
                 @Override public FnLockController.Target current() {
                     Target target = currentTarget(null);
-                    return target == null ? null : new FnLockController.Target(target,
-                            target.focus.token, target.focus.uid);
+                    return target == null ? null : new FnLockController.Target(target.focus,
+                            target.focus.token, target.focus.uid, target.has(ShortcutFeatures.FN_LOCK));
                 }
                 @Override public void info(String message) { WinModule.this.info(message); }
                 @Override public void error(String message, Throwable error) { failure(message, error); }
@@ -239,7 +268,7 @@ public final class WinModule extends XposedModule {
                         || !WinPolicy.isWinTab(event.getKeyCode(), event.getModifiers())
                         || !(chain.getArg(0) instanceof IBinder inputToken)) return chain.proceed();
                 Target target = currentTarget(inputToken);
-                if (target == null) return chain.proceed();
+                if (withFeature(target, ShortcutFeatures.WIN_TAB_FALLBACK) == null) return chain.proceed();
 
                 if (event.getRepeatCount() == 0 && winTabFallbackTraces.getAndUpdate(n -> Math.min(n + 1, 24)) < 24) {
                     info("WIN_TAB_FALLBACK_BLOCKED focus=" + target.focus.pkg + " down=" + event.getDownTime());
@@ -266,7 +295,7 @@ public final class WinModule extends XposedModule {
                 if (!ready || !altTabReady || !(chain.getArg(0) instanceof KeyEvent event)
                         || !AltTabPresses.observes(event.getKeyCode())) return chain.proceed();
                 Target target = (((Integer) chain.getArg(1)) & POLICY_INTERACTIVE) != 0 ? currentTarget(null) : null;
-                boolean allow = routeAltTab(altQueue, event, target);
+                boolean allow = routeAltTab(altQueue, event, withFeature(target, ShortcutFeatures.ALT_QUEUE));
                 Dispatch previous = allowedEvent.get();
                 if (allow) allowedEvent.set(new Dispatch(event, target, "QUEUE"));
                 else allowedEvent.remove();
@@ -330,10 +359,19 @@ public final class WinModule extends XposedModule {
                 + " canceled=" + event.isCanceled() + " down=" + event.getDownTime() + " result=" + result);
     }
 
-    private synchronized void applyBootScope(Set<String> packages, boolean systemScoped) {
-        allowedApps = packages;
+    private synchronized void applyPolicies(ModuleControl.Snapshot snapshot, String source) {
+        policies = snapshot.system() ? snapshot.policies() : Map.of();
+        configuredFn = snapshot.system() && snapshot.fnNeeded();
         refreshTarget();
-        info("SCOPE_APPLIED source=boot system=" + systemScoped + " apps=" + packages);
+        if (fnLock != null) fnLock.setEnabled(configuredFn);
+        info("SCOPE_APPLIED source=" + source + " system=" + snapshot.system() + " apps=" + snapshot.apps());
+    }
+
+    private synchronized void applyPreview(Integer mask) {
+        previewMask = mask;
+        refreshTarget();
+        if (fnLock != null) fnLock.setEnabled(configuredFn
+                || (mask != null && ShortcutFeatures.has(mask, ShortcutFeatures.FN_LOCK)));
     }
 
     private synchronized void updateFocus(Focus next) {
@@ -343,9 +381,16 @@ public final class WinModule extends XposedModule {
     }
 
     private void refreshTarget() {
-        // A new focus or a changed scope invalidates earlier Win gestures.
-        routeTarget = focused != null && allowedApps.contains(focused.pkg) ? new Target(focused) : null;
+        Integer mask = focused == null ? null : policies.get(focused.pkg);
+        if (focused != null && modulePackage != null && focused.pkg.equals(modulePackage)) mask = previewMask;
+        Target next = mask == null ? null : new Target(focused, mask);
+        if (java.util.Objects.equals(routeTarget, next)) return;
+        routeTarget = next;
         if (fnLock != null) fnLock.focusChanged();
+    }
+
+    private static Target withFeature(Target target, int feature) {
+        return target != null && target.has(feature) ? target : null;
     }
 
     private Target currentTarget(IBinder eventToken) {

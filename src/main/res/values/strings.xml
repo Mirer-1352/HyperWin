@@ -1,4 +1,4 @@
 <resources>
     <string name="app_name">HyperWin</string>
-    <string name="module_description">按应用转发 Win、Alt+Tab 和 Win+Tab；模块设置中可开启小米键盘 Fn 锁。</string>
+    <string name="module_description">在模块设置中测试键盘，并按应用或分组配置 Win、Alt+Tab、Win+Tab 和小米键盘 Fn 锁。</string>
 </resources>

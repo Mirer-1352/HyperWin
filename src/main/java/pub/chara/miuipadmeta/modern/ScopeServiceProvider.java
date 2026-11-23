@@ -10,6 +10,7 @@ import android.os.Bundle;
 import android.os.Process;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 import io.github.libxposed.service.XposedService;
 import io.github.libxposed.service.XposedProvider;
 
@@ -24,11 +25,11 @@ public final class ScopeServiceProvider extends ContentProvider {
 
     @Override public Bundle call(String method, String arg, Bundle extras) {
         int caller = Binder.getCallingUid();
-        if (ScopeSelection.READ_METHOD.equals(method)) {
-            if (caller != Process.SYSTEM_UID) throw new SecurityException("Only system_server may read boot scope");
+        if (ScopeSelection.READ_METHOD.equals(method) || ModuleControl.READ_POLICIES.equals(method)) {
+            if (caller != Process.SYSTEM_UID) throw new SecurityException("Only system_server may read input policy");
             long identity = Binder.clearCallingIdentity();
             try {
-                return readBootScope();
+                return readPolicies(ScopeSelection.READ_METHOD.equals(method), extras);
             } finally {
                 Binder.restoreCallingIdentity(identity);
             }
@@ -39,20 +40,29 @@ public final class ScopeServiceProvider extends ContentProvider {
         return delegate.call(method, arg, extras);
     }
 
-    private Bundle readBootScope() {
+    private Bundle readPolicies(boolean refreshScope, Bundle extras) {
         Bundle reply = new Bundle();
-        reply.putBoolean(FnSettings.KEY, FnSettings.enabled(getContext()));
         android.content.Context app = getContext().getApplicationContext();
-        if (app instanceof ScopeApplication module) {
+        ScopeApplication module = (ScopeApplication) app;
+        Set<String> scoped;
+        if (refreshScope) {
             XposedService service = module.service();
-            if (service != null) {
-                List<String> scope = service.getScope();
-                if (scope == null) throw new IllegalStateException("LSPosed returned no scope");
-                reply.putStringArrayList(ScopeSelection.RESPONSE_SCOPE, new ArrayList<>(scope));
+            if (service == null) {
+                reply.putBoolean(ScopeSelection.RESPONSE_PENDING, true);
                 return reply;
             }
+            List<String> scope = service.getScope();
+            if (scope == null) throw new IllegalStateException("LSPosed returned no scope");
+            reply.putStringArrayList(ScopeSelection.RESPONSE_SCOPE, new ArrayList<>(scope));
+            scoped = ScopeSelection.apps(scope);
+        } else {
+            scoped = ScopeSelection.apps(extras.getStringArrayList(ModuleControl.PACKAGES));
         }
-        reply.putBoolean(ScopeSelection.RESPONSE_PENDING, true);
+        Profiles profiles = module.profiles().read();
+        Bundle masks = new Bundle();
+        profiles.policies(scoped).forEach(masks::putInt);
+        reply.putBundle(ModuleControl.MASKS, masks);
+        reply.putInt(ModuleControl.DEFAULTS, profiles.defaults);
         return reply;
     }
 

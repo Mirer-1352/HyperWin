@@ -1,13 +1,13 @@
 # HyperWin
 
-HyperWin 是面向小米平板 HyperOS 的 LSPosed API 102 模块。连接实体键盘时，它让选定应用接收 Win（Meta）、Alt+Tab 和 Win+Tab，适合 Windows App（远程桌面）和 Moonlight 等客户端。
+HyperWin 是面向小米平板 HyperOS 的 LSPosed API 102 模块。它让选定应用接收实体键盘的 Win（Meta）、Alt+Tab 和 Win+Tab，并支持小米妙控键盘 Fn 锁。2.0.0 可按应用或分组配置这些功能，也可在模块内直接测试按键。
 
 ## 功能
 
 - 在所选应用获得键盘焦点时，抑制 Win 单击唤出的 Dock 和长按快捷键列表，应用仍可收到 Win 事件。
 - 将 Alt+Tab 所需的按键事件交给应用，支持在 Windows 远程会话中切换窗口。
 - 应用有机会接收 Win+Tab。若所选应用未处理，HyperWin 跳过本机的多任务兜底。
-- 在 LSPosed 中选择应用。模块启动时读取作用域，平时使用内存中的名单。
+- 在 LSPosed 中选择应用。模块启动时读取作用域，也可在 HyperWin 主页手动刷新。
 - 可选的小米键盘 Fn 锁。开启后在作用域内直接使用 F1–F12，按住 Fn 使用亮度、媒体等原功能。默认关闭。当前仅匹配已验证的 Keyboard `15d9:00a3` 和 Consumer `15d9:00a4`。
 
 ## 兼容性
@@ -19,13 +19,21 @@ HyperWin 是面向小米平板 HyperOS 的 LSPosed API 102 模块。连接实体
 1. 从 [GitHub Releases](https://github.com/Mirer-1352/HyperWin/releases) 下载并安装 `HyperWin-*.apk`。
 2. 在 LSPosed 启用 **HyperWin**，勾选 **系统框架** 和需要生效的应用。若正在使用原版 MiuiPadMeta，先在 LSPosed 停用原版，避免两个模块同时修改输入分发。
 3. 软重启并解锁平板。在已勾选的应用中测试 Win；连接远程会话后测试 Alt+Tab 和 Win+Tab。远端是否响应组合键取决于客户端的键盘重定向支持与设置。
-4. 增删作用域后，再软重启并解锁一次。
+4. 增删目标应用后，在 HyperWin 主页点「刷新作用域列表」。首次勾选系统框架或安装升级后，需软重启并解锁。
 
-在 LSPosed 的 HyperWin **模块设置**中开启「小米键盘 Fn 锁」。开关保存后生效。安装或升级模块后需软重启并解锁，增删作用域也需软重启。开关只控制 Fn 锁，其他型号的键盘保留系统原有行为。
+从 LSPosed 的 HyperWin **模块设置**打开界面。HyperWin 不在桌面创建图标。
+
+- **主页**显示作者、系统模块状态和刷新作用域按钮。
+- **测试**记录前台收到的测试按键，持续 30 秒。可查看原始输入，或在测试页临时使用默认配置和某个作用域应用的生效配置。
+- **功能**按应用或分组配置 Win、Alt+Tab、Win+Tab 和 Fn 锁。每个应用可加入一个组，加入后使用组配置，移出或删除组后恢复个人配置。
+
+保存配置后会通知系统进程应用。升级时保留 Beta 2 的默认行为，包括原来的 Fn 锁状态。Win+Tab 透传依赖 Win 透传。其他型号的键盘保留系统原有 Fn 行为。
 
 [Fn 锁实测映射和验证范围](docs/FN_LOCK_PLAN.md)
 
-HyperWin 沿用本项目现代 API 102 测试版的应用 ID。Beta 1 以及同签名的 Fn 锁开发版均可覆盖升级。
+Beta 1、Beta 2 和同签名的界面测试版均可直接覆盖升级到 2.0.0。
+
+[配置说明和代码维护入口](docs/SETTINGS.md)
 
 ## 排查
 

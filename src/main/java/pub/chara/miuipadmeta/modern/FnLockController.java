@@ -1,12 +1,8 @@
 /* SPDX-License-Identifier: GPL-3.0-only */
 package pub.chara.miuipadmeta.modern;
 
-import android.content.BroadcastReceiver;
 import android.content.Context;
-import android.content.Intent;
-import android.content.IntentFilter;
 import android.hardware.input.InputManager;
-import android.os.Build;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.IBinder;
@@ -25,7 +21,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 /** Preserves native key repeat and existing accessibility filters. No polling or replacement filter. */
 final class FnLockController {
-    record Target(Object identity, IBinder token, int uid) {}
+    record Target(Object identity, IBinder token, int uid, boolean enabled) {}
     interface Host {
         Target current();
         void info(String message);
@@ -98,20 +94,11 @@ final class FnLockController {
 
     void bind(Object service) { serviceInstance = service; }
 
-    void start(Context context, boolean initial) {
+    void start(Context context) {
         if (handler != null) return;
         HandlerThread thread = new HandlerThread("HyperWinFnLock");
         thread.start();
         handler = new Handler(thread.getLooper());
-        BroadcastReceiver config = new BroadcastReceiver() {
-            @Override public void onReceive(Context ignored, Intent intent) {
-                if (FnSettings.ACTION.equals(intent.getAction())) setEnabled(intent.getBooleanExtra(FnSettings.KEY,false));
-            }
-        };
-        IntentFilter configFilter = new IntentFilter(FnSettings.ACTION);
-        if (Build.VERSION.SDK_INT >= 33) {
-            context.registerReceiver(config,configFilter,FnSettings.PERMISSION,handler,Context.RECEIVER_EXPORTED);
-        } else context.registerReceiver(config,configFilter,FnSettings.PERMISSION,handler);
         InputManager manager = context.getSystemService(InputManager.class);
         if (manager == null) throw new IllegalStateException("InputManager not ready");
         Runnable refresh = () -> {
@@ -136,11 +123,11 @@ final class FnLockController {
             @Override public void onInputDeviceChanged(int id) { refresh.run(); }
         },handler);
         refresh.run();
-        setEnabled(initial);
         host.info("FN_LOCK_READY default=false legacyMiuiShortcuts=" + legacyMiuiShortcuts);
     }
 
-    private void setEnabled(boolean next) {
+    void setEnabled(boolean next) {
+        if (enabled == next) return;
         if (next != enabled) presses.invalidate();
         if (next && !failed && !filterActive) {
             try {
@@ -174,7 +161,8 @@ final class FnLockController {
                 event.getScanCode(), legacyMiuiShortcuts);
         if (output == null) return chain.proceed();
         boolean down = event.getAction()==KeyEvent.ACTION_DOWN;
-        Target target = (flags&INTERACTIVE)!=0 ? host.current() : null;
+        Target current = (flags&INTERACTIVE)!=0 ? host.current() : null;
+        Target target = current != null && current.enabled ? current : null;
         FnLockPresses.Decision decision = presses.route(event.getDeviceId(),event.getScanCode(),event.getDownTime(),
                 down,event.getRepeatCount(),output,target==null ? null : target.identity,enabled && !failed);
         if (decision.action()==FnLockPresses.Action.PASS) return chain.proceed();
@@ -229,7 +217,9 @@ final class FnLockController {
         Handler worker = handler;
         if (worker != null) worker.post(() -> {
             Target current = host.current();
-            for (Active held : active.values()) if (current==null || current.identity!=held.target.identity) cancel(held);
+            for (Active held : active.values()) {
+                if (current == null || !current.enabled || current.identity != held.target.identity) cancel(held);
+            }
         });
     }
 
