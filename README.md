@@ -31,13 +31,14 @@ HyperWin 是面向小米平板 HyperOS 的 LSPosed API 102 模块。它让选定
 
 [Fn 锁实测映射和验证范围](docs/FN_LOCK_PLAN.md)
 
-Beta 1、Beta 2 和同签名的界面测试版均可直接覆盖升级到 2.0.0。
+Beta 1、Beta 2 和同签名的测试版均可直接覆盖升级。
 
 [配置说明和代码维护入口](docs/SETTINGS.md)
 
 ## 排查
 
-- 模块未生效时，先核对 LSPosed 中的「系统框架」和目标应用两项都已勾选。软重启、解锁后查看 `HyperWin` 模块日志里的 `READY` 和 `SCOPE_APPLIED source=boot`。
+- 模块未生效时，确认 LSPosed 已勾选「系统框架」及目标应用。软重启并解锁后，在 HyperWin 主页核对激活状态并刷新作用域。
+- 自 2.0.1 起，HyperWin 在系统日志中仅保留启动状态与错误信息。需要检查按键时，使用模块内的「测试」页。
 - 若只在某个界面出问题，反馈时请注明设备代号、ROM、Android 和 LSPosed 版本，以及应用包名和复现步骤。可附上相关模块日志，分享前删去个人信息。
 - 若要恢复系统默认的键盘行为，在 LSPosed 停用 HyperWin 后软重启。
 

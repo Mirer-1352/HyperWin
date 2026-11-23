@@ -11,19 +11,18 @@ import android.view.KeyEvent;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.Map;
-import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicBoolean;
 import io.github.libxposed.api.XposedModule;
 
 public final class WinModule extends XposedModule {
     private static final String TAG = "HyperWin";
-    private static final int MAX_TRACES = 96;
     // KeyGestureController uses this bit to start keyboard combinations only on an interactive display.
     private static final int POLICY_INTERACTIVE = 0x20000000;
     private record Focus(String pkg, IBinder token, Object policy, int uid) {}
     private record Target(Focus focus, int mask) {
         boolean has(int feature) { return ShortcutFeatures.has(mask, feature); }
     }
-    private record Dispatch(KeyEvent event, Target target, String phase) {}
+    private record Dispatch(KeyEvent event, Target target) {}
 
     private final WinPresses uiPresses = new WinPresses();
     private final WinPresses dispatchPresses = new WinPresses();
@@ -31,9 +30,7 @@ public final class WinModule extends XposedModule {
     private final AltTabPresses altQueue = new AltTabPresses();
     private final AltTabPresses altDispatch = new AltTabPresses();
     private final ThreadLocal<Dispatch> allowedEvent = new ThreadLocal<>();
-    private final AtomicInteger traces = new AtomicInteger();
-    private final AtomicInteger altTraces = new AtomicInteger();
-    private final AtomicInteger winTabFallbackTraces = new AtomicInteger();
+    private final AtomicBoolean focusFailureReported = new AtomicBoolean();
 
     private volatile boolean ready;
     private volatile boolean altTabReady;
@@ -45,10 +42,6 @@ public final class WinModule extends XposedModule {
     private volatile Target routeTarget;
     private Method keyguardOn;
     private FnLockController fnLock;
-
-    @Override public void onModuleLoaded(ModuleLoadedParam param) {
-        if (param.isSystemServer()) info("LOAD api=" + getApiVersion());
-    }
 
     @Override public void onSystemServerStarting(SystemServerStartingParam param) {
         if (ready || getApiVersion() < 102) return;
@@ -63,16 +56,15 @@ public final class WinModule extends XposedModule {
             if (altReady) capabilities |= ShortcutFeatures.ALT_DISPATCH | ShortcutFeatures.ALT_QUEUE;
             if (winTabReady) capabilities |= ShortcutFeatures.WIN_TAB_FALLBACK;
             if (fnLock != null) capabilities |= ShortcutFeatures.FN_LOCK;
-            info("READY scope=lsposed-boot-snapshot defaultDisplay=true ownerUserOnly=true altTab=" + altReady
-                    + " winTabFallback=" + winTabReady);
+            Log.i(TAG, "READY altTab=" + altReady + " winTabFallback=" + winTabReady + " fnLock=" + (fnLock != null));
             new BootScopeLoader(modulePackage, capabilities, new BootScopeLoader.Listener() {
                 @Override public void applied(ModuleControl.Snapshot snapshot,
-                        android.content.Context context, String source) {
+                        android.content.Context context) {
                     if (fnLock != null) {
                         try { fnLock.start(context); }
                         catch (RuntimeException | LinkageError error) { failure("FN_LOCK_START_FAILED", error); }
                     }
-                    applyPolicies(snapshot, source);
+                    applyPolicies(snapshot);
                 }
 
                 @Override public void preview(Integer mask) { applyPreview(mask); }
@@ -121,7 +113,7 @@ public final class WinModule extends XposedModule {
                     next = new Focus(pkg, binder, chain.getThisObject(), uid);
                 }
             } catch (ReflectiveOperationException | RuntimeException error) {
-                failure("FOCUS unavailable", error);
+                if (focusFailureReported.compareAndSet(false, true)) failure("FOCUS unavailable", error);
             }
             updateFocus(next);
             return original;
@@ -135,7 +127,6 @@ public final class WinModule extends XposedModule {
                 // Otherwise let the native handler finish presses it started outside scope.
                 boolean suppress = matchPress(uiPresses, event, withFeature(target, ShortcutFeatures.WIN_UI)) != null;
                 if (isUp(event)) finish(uiPresses, event);
-                trace("UI", event, target, suppress, null);
                 return suppress ? null : chain.proceed();
             }
             if (event.isMetaPressed() && uiPresses.hasTarget(event.getDeviceId(), target)) return null;
@@ -155,7 +146,7 @@ public final class WinModule extends XposedModule {
                     withFeature(target, ShortcutFeatures.ALT_DISPATCH));
 
             Dispatch previous = allowedEvent.get();
-            if (allowWin || allowAlt) allowedEvent.set(new Dispatch(event, target, "DISPATCH"));
+            if (allowWin || allowAlt) allowedEvent.set(new Dispatch(event, target));
             else allowedEvent.remove();
             try {
                 Object result = chain.proceed();
@@ -163,14 +154,12 @@ public final class WinModule extends XposedModule {
                     if (result instanceof Long decision && (decision < 0 || (isUp(event) && decision == 0))) {
                         finish(dispatchPresses, event);
                     }
-                    trace("DISPATCH", event, target, allowWin, result);
                 }
                 if (altEvent) {
                     if (event.getKeyCode() == AltTabPresses.TAB && result instanceof Long decision
                             && (decision < 0 || (isUp(event) && decision == 0))) {
                         altDispatch.finishTab(event.getDeviceId(), event.getDownTime());
                     }
-                    traceAlt("DISPATCH", event, target, allowAlt, result);
                 }
                 if (event.getKeyCode() == AltTabPresses.TAB && result instanceof Long decision
                         && (decision < 0 || (isUp(event) && decision == 0))) finish(winTabPresses, event);
@@ -185,18 +174,10 @@ public final class WinModule extends XposedModule {
             Dispatch dispatchForWin = allowedEvent.get();
             if (ready && dispatchForWin != null && routeTarget == dispatchForWin.target
                     && chain.getArg(0) == dispatchForWin.event) {
-                KeyEvent event = dispatchForWin.event;
-                if (altTabReady && event.getKeyCode() == AltTabPresses.TAB && !event.isMetaPressed()) {
-                    traceAlt("SKIP_" + dispatchForWin.phase, event, dispatchForWin.target, true, true);
-                }
                 return Boolean.TRUE;
             }
             return chain.proceed();
         });
-        info("HOOK focus=" + focusChanged.toGenericString());
-        info("HOOK ui=" + ui.toGenericString());
-        info("HOOK dispatch=" + dispatch.toGenericString());
-        info("HOOK pass=" + vendor.toGenericString());
     }
 
     private boolean routeWin(KeyEvent event, Target target, boolean winEvent, boolean win) {
@@ -224,7 +205,6 @@ public final class WinModule extends XposedModule {
                     return target == null ? null : new FnLockController.Target(target.focus,
                             target.focus.token, target.focus.uid, target.has(ShortcutFeatures.FN_LOCK));
                 }
-                @Override public void info(String message) { WinModule.this.info(message); }
                 @Override public void error(String message, Throwable error) { failure(message, error); }
             });
             hook(controller.start).setExceptionMode(ExceptionMode.PROTECTIVE).intercept(chain -> {
@@ -252,7 +232,6 @@ public final class WinModule extends XposedModule {
                 return decision == null ? chain.proceed() : decision;
             });
             fnLock = controller;
-            info("HOOK fnLock=" + controller.queue.toGenericString());
         } catch (ReflectiveOperationException | RuntimeException | LinkageError error) {
             failure("FN_LOCK_UNAVAILABLE unsupported ROM; original Win hooks retained", error);
         }
@@ -270,14 +249,10 @@ public final class WinModule extends XposedModule {
                 Target target = currentTarget(inputToken);
                 if (withFeature(target, ShortcutFeatures.WIN_TAB_FALLBACK) == null) return chain.proceed();
 
-                if (event.getRepeatCount() == 0 && winTabFallbackTraces.getAndUpdate(n -> Math.min(n + 1, 24)) < 24) {
-                    info("WIN_TAB_FALLBACK_BLOCKED focus=" + target.focus.pkg + " down=" + event.getDownTime());
-                }
                 // The app already received this event. Stop the subsequent system shortcut
                 // and fallback-key path without changing anything in normal dispatch.
                 return null;
             });
-            info("HOOK winTabFallback=" + unhandled.toGenericString());
             return true;
         } catch (ReflectiveOperationException | RuntimeException | LinkageError error) {
             failure("WIN_TAB_FALLBACK_DISABLED unsupported input policy", error);
@@ -297,12 +272,10 @@ public final class WinModule extends XposedModule {
                 Target target = (((Integer) chain.getArg(1)) & POLICY_INTERACTIVE) != 0 ? currentTarget(null) : null;
                 boolean allow = routeAltTab(altQueue, event, withFeature(target, ShortcutFeatures.ALT_QUEUE));
                 Dispatch previous = allowedEvent.get();
-                if (allow) allowedEvent.set(new Dispatch(event, target, "QUEUE"));
+                if (allow) allowedEvent.set(new Dispatch(event, target));
                 else allowedEvent.remove();
                 try {
-                    Object result = chain.proceed();
-                    traceAlt("QUEUE", event, target, allow, result);
-                    return result;
+                    return chain.proceed();
                 } finally {
                     if (event.getKeyCode() == AltTabPresses.TAB && isUp(event)) {
                         altQueue.finishTab(event.getDeviceId(), event.getDownTime());
@@ -311,32 +284,11 @@ public final class WinModule extends XposedModule {
                     else allowedEvent.set(previous);
                 }
             });
-            info("HOOK altQueue=" + queue.toGenericString());
             altTabReady = true;
-            observeAltCombination(loader);
             return true;
         } catch (ReflectiveOperationException | RuntimeException | LinkageError error) {
             failure("ALT_TAB_DISABLED queue hook unavailable", error);
             return false;
-        }
-    }
-
-    private void observeAltCombination(ClassLoader loader) {
-        try {
-            Class<?> gestures = Class.forName("com.android.server.input.KeyGestureController", false, loader);
-            Method combinations = find(gestures, "interceptMultiKeyCombination", long.class, KeyEvent.class);
-            hook(combinations).setExceptionMode(ExceptionMode.PROTECTIVE).intercept(chain -> {
-                Object result = chain.proceed();
-                Dispatch current = allowedEvent.get();
-                if (current != null && chain.getArg(0) == current.event
-                        && current.event.getKeyCode() == AltTabPresses.TAB && !current.event.isMetaPressed()) {
-                    traceAlt("MULTI_KEY", current.event, current.target, true, result);
-                }
-                return result;
-            });
-            info("OBSERVE altCombination=" + combinations.toGenericString());
-        } catch (ReflectiveOperationException | RuntimeException | LinkageError error) {
-            failure("ALT_MULTI_KEY observer unavailable", error);
         }
     }
 
@@ -349,22 +301,11 @@ public final class WinModule extends XposedModule {
                 altTabModifiers, target);
     }
 
-    private void traceAlt(String stage, KeyEvent event, Target target, boolean scoped, Object result) {
-        if ((event.getAction() != KeyEvent.ACTION_DOWN && !isUp(event)) || event.getRepeatCount() != 0
-                || altTraces.getAndUpdate(n -> Math.min(n + 1, MAX_TRACES)) >= MAX_TRACES) return;
-        Focus focus = focused;
-        info("ALT_" + stage + " " + KeyEvent.keyCodeToString(event.getKeyCode()) + " " + (isUp(event) ? "UP" : "DOWN")
-                + " focus=" + (focus == null ? "unknown" : focus.pkg) + " eligible=" + (target != null)
-                + " chord=" + scoped + " meta=0x" + Integer.toHexString(event.getMetaState())
-                + " canceled=" + event.isCanceled() + " down=" + event.getDownTime() + " result=" + result);
-    }
-
-    private synchronized void applyPolicies(ModuleControl.Snapshot snapshot, String source) {
+    private synchronized void applyPolicies(ModuleControl.Snapshot snapshot) {
         policies = snapshot.system() ? snapshot.policies() : Map.of();
         configuredFn = snapshot.system() && snapshot.fnNeeded();
         refreshTarget();
         if (fnLock != null) fnLock.setEnabled(configuredFn);
-        info("SCOPE_APPLIED source=" + source + " system=" + snapshot.system() + " apps=" + snapshot.apps());
     }
 
     private synchronized void applyPreview(Integer mask) {
@@ -418,15 +359,6 @@ public final class WinModule extends XposedModule {
         tracker.finish(event.getDeviceId(), event.getKeyCode(), event.getDownTime());
     }
 
-    private void trace(String stage, KeyEvent event, Target target, boolean scoped, Object result) {
-        if (event.getRepeatCount() != 0 || traces.getAndUpdate(n -> Math.min(n + 1, MAX_TRACES)) >= MAX_TRACES) return;
-        Focus focus = focused;
-        info("WIN_" + stage + " " + (isUp(event) ? "UP" : "DOWN")
-                + " focus=" + (focus == null ? "unknown" : focus.pkg)
-                + " eligible=" + (target != null) + " scoped=" + scoped
-                + (result == null ? "" : " result=" + result));
-    }
-
     private static Method find(Class<?> owner, String name, Class<?> result, Class<?>... parameters)
             throws ReflectiveOperationException {
         Method method = owner.getDeclaredMethod(name, parameters);
@@ -435,13 +367,7 @@ public final class WinModule extends XposedModule {
         return method;
     }
 
-    private void info(String message) {
-        Log.i(TAG, message);
-        log(Log.INFO, TAG, message);
-    }
-
     private void failure(String message, Throwable error) {
         Log.e(TAG, message, error);
-        log(Log.ERROR, TAG, message, error);
     }
 }

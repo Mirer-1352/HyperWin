@@ -33,7 +33,7 @@ final class BootScopeLoader {
     private Runnable expirePreview;
 
     interface Listener {
-        void applied(ModuleControl.Snapshot snapshot, Context context, String source);
+        void applied(ModuleControl.Snapshot snapshot, Context context);
         void preview(Integer mask);
         void failed(Throwable error);
     }
@@ -93,7 +93,7 @@ final class BootScopeLoader {
     private void readOnBoot(Context context, int attempt) {
         if (snapshot != null) return;
         try {
-            read(context, true, "boot");
+            read(context, true);
         } catch (RuntimeException | LinkageError error) {
             int next = attempt + 1;
             if (next < SERVICE_DELAYS_MS.length) {
@@ -113,8 +113,8 @@ final class BootScopeLoader {
                 try {
                     switch (command) {
                         case ModuleControl.QUERY -> applied = snapshot != null;
-                        case ModuleControl.REFRESH -> { read(context, true, "manual"); applied = true; }
-                        case ModuleControl.APPLY -> { read(context, snapshot == null, "settings"); applied = true; }
+                        case ModuleControl.REFRESH -> { read(context, true); applied = true; }
+                        case ModuleControl.APPLY -> { read(context, snapshot == null); applied = true; }
                         case ModuleControl.PREVIEW -> applied = startPreview(intent);
                         case ModuleControl.END -> {
                             if (preview != null && preview.equals(intent.getStringExtra(ModuleControl.PREVIEW_ID))) {
@@ -163,7 +163,7 @@ final class BootScopeLoader {
         listener.preview(null);
     }
 
-    private void read(Context context, boolean refreshScope, String source) {
+    private void read(Context context, boolean refreshScope) {
         Bundle args = null;
         if (!refreshScope) {
             args = new Bundle();
@@ -195,7 +195,7 @@ final class BootScopeLoader {
         ModuleControl.Snapshot next = new ModuleControl.Snapshot(apps, Map.copyOf(policies),
                 ShortcutFeatures.sanitize(reply.getInt(ModuleControl.DEFAULTS)), systemScoped);
         endPreview();
-        listener.applied(next, context, source);
+        listener.applied(next, context);
         snapshot = next;
     }
 

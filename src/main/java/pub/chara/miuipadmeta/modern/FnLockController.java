@@ -17,14 +17,12 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicInteger;
 
 /** Preserves native key repeat and existing accessibility filters. No polling or replacement filter. */
 final class FnLockController {
     record Target(Object identity, IBinder token, int uid, boolean enabled) {}
     interface Host {
         Target current();
-        void info(String message);
         void error(String message, Throwable error);
     }
     private static final int INJECTED = 0x01000000, TRUSTED = 0x02000000;
@@ -63,7 +61,7 @@ final class FnLockController {
     private final ConcurrentHashMap<EventId, Route> routes = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<EventId, Pending> pending = new ConcurrentHashMap<>();
     private final ThreadLocal<Boolean> rewriting = new ThreadLocal<>();
-    private final AtomicInteger traces = new AtomicInteger();
+    private final AtomicBoolean recycleFailureReported = new AtomicBoolean();
     private volatile Map<Integer, FnKeyMap.Device> devices = Map.of();
     private volatile Handler handler;
     private volatile Object serviceInstance;
@@ -115,7 +113,6 @@ final class FnLockController {
                 for (Active held : active.values()) if (held.original.getDeviceId()==old) cancel(held);
             }
             devices = Map.copyOf(next);
-            host.info("FN_LOCK_DEVICES " + devices);
         };
         manager.registerInputDeviceListener(new InputManager.InputDeviceListener() {
             @Override public void onInputDeviceAdded(int id) { refresh.run(); }
@@ -123,7 +120,6 @@ final class FnLockController {
             @Override public void onInputDeviceChanged(int id) { refresh.run(); }
         },handler);
         refresh.run();
-        host.info("FN_LOCK_READY default=false legacyMiuiShortcuts=" + legacyMiuiShortcuts);
     }
 
     void setEnabled(boolean next) {
@@ -140,7 +136,6 @@ final class FnLockController {
         if (!next) for (Active held : active.values()) cancel(held);
         // Keep native filtering enabled after first opt-in so held physical UPs can be consumed safely.
         // Disabled/out-of-scope events simply use the original filter method; no timer is running.
-        host.info("FN_LOCK_CONFIG enabled="+enabled+" available="+!failed+" filter="+filterActive);
     }
 
     void filterChanged(Object service) {
@@ -199,7 +194,9 @@ final class FnLockController {
         } catch (ReflectiveOperationException | RuntimeException error) { fail(error); }
         finally {
             try { recycle.invoke(event); }
-            catch (ReflectiveOperationException | RuntimeException error) { host.error("FN_LOCK_RECYCLE_FAILED",error); }
+            catch (ReflectiveOperationException | RuntimeException error) {
+                if (recycleFailureReported.compareAndSet(false, true)) host.error("FN_LOCK_RECYCLE_FAILED", error);
+            }
         }
         return Boolean.FALSE;
     }
@@ -255,10 +252,7 @@ final class FnLockController {
         }
         // These are system shortcuts. MIUI needs both edges, but it can consume just
         // the UP to invoke the action. Keep both out of the app to avoid an orphan DOWN.
-        if (FnKeyMap.isMiuiShortcut(output)) {
-            traceMapping(source, mapped, canceled, "system queueResult=" + result);
-            return;
-        }
+        if (FnKeyMap.isMiuiShortcut(output)) return;
         routes.putIfAbsent(EventId.of(mapped),new Route(held.target));
         if (routes.size()>256) throw new IllegalStateException("Too many pending Fn routes");
         int policy = (flags & ~PASS_TO_USER) | FILTERED;
@@ -273,17 +267,6 @@ final class FnLockController {
             if (injected!=0) throw new IllegalStateException("Fn lock injection result="+injected);
         }
         held.emitted = true;
-        traceMapping(source, mapped, canceled, "dispatch queueResult=" + result);
-    }
-
-    private void traceMapping(KeyEvent source, KeyEvent mapped, boolean canceled, String route) {
-        if (source.getRepeatCount()==0 && traces.getAndIncrement()<192) {
-            host.info("FN_LOCK_KEY "+KeyEvent.keyCodeToString(source.getKeyCode())+"->"
-                    +KeyEvent.keyCodeToString(mapped.getKeyCode())+" action="+mapped.getAction()
-                    +" device="+mapped.getDeviceId()+" scan="+mapped.getScanCode()
-                    +" meta=0x"+Integer.toHexString(mapped.getMetaState())+" canceled="+canceled
-                    +" route="+route);
-        }
     }
 
     private void retire(Active held) {
@@ -293,6 +276,7 @@ final class FnLockController {
         if (route!=null) handler.postDelayed(() -> routes.remove(id,route),10000);
     }
     private void fail(Throwable error) {
+        if (failed) return;
         failed = true;
         presses.invalidate();
         host.error("FN_LOCK_DISABLED mapping failed; original Win hooks remain",error);
