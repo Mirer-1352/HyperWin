@@ -1,4 +1,4 @@
 <resources>
     <string name="app_name">HyperWin</string>
-    <string name="module_description">在 LSPosed 勾选系统框架和目标应用，软重启后启用 Win、Alt+Tab 和 Win+Tab 转发。</string>
+    <string name="module_description">按应用转发 Win、Alt+Tab 和 Win+Tab；模块设置中可开启小米键盘 Fn 锁。</string>
 </resources>

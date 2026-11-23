@@ -141,7 +141,11 @@ try {
     Invoke-Checked (Join-Path $toolRoot 'zipalign.exe') @('-c','4',$candidate)
     Invoke-Checked (Join-Path $toolRoot 'aapt2.exe') @('dump','badging',$candidate)
     $permissions = & (Join-Path $toolRoot 'aapt2.exe') dump permissions $candidate
-    if ($LASTEXITCODE -ne 0 -or ($permissions -match 'uses-permission')) { throw 'Unexpected permission or permissions dump failure.' }
+    if ($LASTEXITCODE -ne 0) { throw 'Permissions dump failure.' }
+    $requested = @($permissions | Where-Object { $_ -match '^uses-permission' })
+    if ($requested.Count -ne 1 -or $requested[0] -notmatch "name='pub.chara.miuipadmeta.modern.permission.CONFIGURE'") {
+        throw "Only the module's own signature configuration permission is expected: $requested"
+    }
 
     $archive = [IO.Compression.ZipFile]::OpenRead($candidate)
     try {
@@ -181,7 +185,7 @@ try {
     foreach ($requiredClass in @('Lio/github/libxposed/service/XposedProvider;', 'Lio/github/libxposed/service/IXposedService$Stub;', 'Lpub/chara/miuipadmeta/modern/ScopeServiceProvider;')) {
         if ($requiredClass -cnotin $classNames) { throw "Scope service runtime class missing: $requiredClass" }
     }
-    'PASS: modern entry, system_server scope (system), no legacy entry, no permissions; Xposed API compile-only.' |
+    'PASS: modern entry, system_server scope (system), no legacy entry; only own signature configuration permission; Xposed API compile-only.' |
         Add-Content -LiteralPath $buildLog -Encoding utf8
 
     $final = Join-Path $OutputDirectory ('HyperWin-' + $version.versionName + $suffix + '.apk')

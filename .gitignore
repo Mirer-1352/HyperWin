@@ -5,6 +5,7 @@
 /.codex-work/
 /local.properties
 /signing/
+/docs/fn-lock-evidence/
 *.apk
 *.idsig
 *.iml

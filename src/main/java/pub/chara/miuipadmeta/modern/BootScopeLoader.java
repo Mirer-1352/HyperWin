@@ -23,7 +23,7 @@ final class BootScopeLoader {
     private final Listener listener;
 
     interface Listener {
-        void applied(Set<String> apps, boolean systemScoped);
+        void applied(Set<String> apps, boolean systemScoped, Context context, boolean fnLock);
         void failed(Throwable error);
     }
 
@@ -89,7 +89,8 @@ final class BootScopeLoader {
                 }
                 ArrayList<String> raw = reply.getStringArrayList(ScopeSelection.RESPONSE_SCOPE);
                 if (raw == null) throw new IllegalStateException("Missing LSPosed scope response");
-                listener.applied(ScopeSelection.fromFramework(raw), raw.contains("system"));
+                listener.applied(ScopeSelection.fromFramework(raw), raw.contains("system"), context,
+                        reply.getBoolean(FnSettings.KEY, false));
                 return;
             } catch (RuntimeException | LinkageError error) {
                 last = error;

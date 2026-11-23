@@ -41,6 +41,7 @@ public final class ScopeServiceProvider extends ContentProvider {
 
     private Bundle readBootScope() {
         Bundle reply = new Bundle();
+        reply.putBoolean(FnSettings.KEY, FnSettings.enabled(getContext()));
         android.content.Context app = getContext().getApplicationContext();
         if (app instanceof ScopeApplication module) {
             XposedService service = module.service();

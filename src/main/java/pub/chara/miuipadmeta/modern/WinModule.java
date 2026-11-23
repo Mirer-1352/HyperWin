@@ -19,7 +19,7 @@ public final class WinModule extends XposedModule {
     private static final int MAX_TRACES = 96;
     // KeyGestureController uses this bit to start keyboard combinations only on an interactive display.
     private static final int POLICY_INTERACTIVE = 0x20000000;
-    private record Focus(String pkg, IBinder token, Object policy) {}
+    private record Focus(String pkg, IBinder token, Object policy, int uid) {}
     private record Target(Focus focus) {}
     private record Dispatch(KeyEvent event, Target target, String phase) {}
 
@@ -38,6 +38,7 @@ public final class WinModule extends XposedModule {
     private volatile Focus focused;
     private volatile Target routeTarget;
     private Method keyguardOn;
+    private FnLockController fnLock;
 
     @Override public void onModuleLoaded(ModuleLoadedParam param) {
         if (param.isSystemServer()) info("LOAD api=" + getApiVersion());
@@ -50,11 +51,17 @@ public final class WinModule extends XposedModule {
             ready = true;
             boolean altReady = installAltQueue(param.getClassLoader());
             boolean winTabReady = installWinTabFallback(param.getClassLoader());
+            installFnLock(param.getClassLoader());
             info("READY scope=lsposed-boot-snapshot defaultDisplay=true ownerUserOnly=true altTab=" + altReady
                     + " winTabFallback=" + winTabReady);
             new BootScopeLoader(getModuleApplicationInfo().packageName, new BootScopeLoader.Listener() {
-                @Override public void applied(Set<String> apps, boolean systemScoped) {
+                @Override public void applied(Set<String> apps, boolean systemScoped,
+                        android.content.Context context, boolean fnEnabled) {
                     applyBootScope(apps, systemScoped);
+                    if (fnLock != null) {
+                        try { fnLock.start(context, fnEnabled); }
+                        catch (RuntimeException | LinkageError error) { failure("FN_LOCK_START_FAILED", error); }
+                    }
                 }
 
                 @Override public void failed(Throwable error) {
@@ -98,7 +105,7 @@ public final class WinModule extends XposedModule {
                         && UserHandle.getUserHandleForUid(uid).equals(Process.myUserHandle())
                         && owner.invoke(win) instanceof String pkg
                         && token.get(win) instanceof IBinder binder) {
-                    next = new Focus(pkg, binder, chain.getThisObject());
+                    next = new Focus(pkg, binder, chain.getThisObject(), uid);
                 }
             } catch (ReflectiveOperationException | RuntimeException error) {
                 failure("FOCUS unavailable", error);
@@ -178,6 +185,48 @@ public final class WinModule extends XposedModule {
         info("HOOK ui=" + ui.toGenericString());
         info("HOOK dispatch=" + dispatch.toGenericString());
         info("HOOK pass=" + vendor.toGenericString());
+    }
+
+    private void installFnLock(ClassLoader loader) {
+        try {
+            FnLockController controller = new FnLockController(loader, new FnLockController.Host() {
+                @Override public FnLockController.Target current() {
+                    Target target = currentTarget(null);
+                    return target == null ? null : new FnLockController.Target(target,
+                            target.focus.token, target.focus.uid);
+                }
+                @Override public void info(String message) { WinModule.this.info(message); }
+                @Override public void error(String message, Throwable error) { failure(message, error); }
+            });
+            hook(controller.start).setExceptionMode(ExceptionMode.PROTECTIVE).intercept(chain -> {
+                Object result = chain.proceed();
+                controller.bind(chain.getThisObject());
+                return result;
+            });
+            hook(controller.setFilter).setExceptionMode(ExceptionMode.PROTECTIVE).intercept(chain -> {
+                Object result = chain.proceed();
+                controller.filterChanged(chain.getThisObject());
+                return result;
+            });
+            hook(controller.filter).setExceptionMode(ExceptionMode.PROTECTIVE).intercept(chain -> {
+                if (!(chain.getArg(0) instanceof KeyEvent event)) return chain.proceed();
+                return controller.onFilter(chain, event, (Integer) chain.getArg(1));
+            });
+            hook(controller.queue).setExceptionMode(ExceptionMode.PROTECTIVE).intercept(chain -> {
+                if (!(chain.getArg(0) instanceof KeyEvent event)) return chain.proceed();
+                return controller.onQueue(chain, event, (Integer) chain.getArg(1));
+            });
+            hook(controller.dispatch).setExceptionMode(ExceptionMode.PROTECTIVE).intercept(chain -> {
+                if (!(chain.getArg(1) instanceof KeyEvent event)) return chain.proceed();
+                IBinder token = chain.getArg(0) instanceof IBinder binder ? binder : null;
+                Long decision = controller.dispatchDecision(token, event);
+                return decision == null ? chain.proceed() : decision;
+            });
+            fnLock = controller;
+            info("HOOK fnLock=" + controller.queue.toGenericString());
+        } catch (ReflectiveOperationException | RuntimeException | LinkageError error) {
+            failure("FN_LOCK_UNAVAILABLE unsupported ROM; original Win hooks retained", error);
+        }
     }
 
     private boolean installWinTabFallback(ClassLoader loader) {
@@ -296,6 +345,7 @@ public final class WinModule extends XposedModule {
     private void refreshTarget() {
         // A new focus or a changed scope invalidates earlier Win gestures.
         routeTarget = focused != null && allowedApps.contains(focused.pkg) ? new Target(focused) : null;
+        if (fnLock != null) fnLock.focusChanged();
     }
 
     private Target currentTarget(IBinder eventToken) {
