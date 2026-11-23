@@ -1,0 +1,32 @@
+plugins {
+    id 'com.android.application' version '9.3.0'
+}
+
+def moduleVersion = new Properties()
+file('version.properties').withInputStream { moduleVersion.load(it) }
+
+android {
+    namespace 'pub.chara.miuipadmeta.modern'
+    compileSdk 37
+    defaultConfig {
+        applicationId moduleVersion.applicationId
+        minSdk moduleVersion.minSdk.toInteger()
+        targetSdk moduleVersion.targetSdk.toInteger()
+        versionCode moduleVersion.versionCode.toInteger()
+        versionName moduleVersion.versionName
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    buildTypes {
+        release { minifyEnabled false }
+    }
+}
+
+// Exact official API, stored locally for reproducible, offline builds.
+// Its implementation is supplied by LSPosed and MUST NOT enter the module dex.
+dependencies {
+    compileOnly files('vendor/api-102.0.0.jar')
+    implementation files('vendor/service-102.0.0.jar', 'vendor/interface-102.0.0.jar')
+}
